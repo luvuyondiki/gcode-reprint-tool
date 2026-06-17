@@ -7,7 +7,13 @@ import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from gcode_resume import ResumeParams, _extract_temps, analyze_gcode, generate_resume_gcode
+from gcode_resume import (
+    ResumeParams,
+    _extract_temps,
+    analyze_gcode,
+    build_path_preview,
+    generate_resume_gcode,
+)
 
 WEB_DIR = Path(__file__).parent / "web"
 PORT = 8765
@@ -127,6 +133,9 @@ class ResumeHandler(BaseHTTPRequestHandler):
         lines = gcode_bytes.decode("utf-8", errors="replace").splitlines()
         result = generate_resume_gcode(lines, params, require_extrusion=require_extrusion)
         output = "\n".join(result.output_lines) + "\n"
+        preview = build_path_preview(lines, params, result)
+        join_warnings = preview["join_info"].get("warnings", [])
+        all_warnings = list(dict.fromkeys(result.warnings + join_warnings))
 
         self._send_json(
             200,
@@ -139,10 +148,11 @@ class ResumeHandler(BaseHTTPRequestHandler):
                 "lines_removed": result.lines_removed,
                 "hotend_temp": result.hotend_temp,
                 "bed_temp": result.bed_temp,
-                "warnings": result.warnings,
-                "warning": result.warning,
+                "warnings": all_warnings,
+                "warning": "; ".join(all_warnings) if all_warnings else None,
                 "layers": result.analysis.layer_z_values if result.analysis else [],
                 "max_z": result.analysis.max_z if result.analysis else None,
+                "preview": preview,
             },
         )
 

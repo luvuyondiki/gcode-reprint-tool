@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -364,6 +365,399 @@ def build_resume_header(
         ]
     )
     return header
+
+
+MAX_PREVIEW_SEGMENTS = 25000
+
+
+def _classify_segment(
+    x1: float,
+    y1: float,
+    z1: float,
+    x2: float,
+    y2: float,
+    z2: float,
+    is_extrusion: bool,
+) -> str:
+    if is_extrusion:
+        return "extrusion"
+    if abs(x2 - x1) < 1e-6 and abs(y2 - y1) < 1e-6 and abs(z2 - z1) > 1e-6:
+        return "z_hop"
+    return "travel"
+
+
+def parse_gcode_paths(
+    lines: list[str],
+    stopped_z: float | None = None,
+    resume_line_index: int | None = None,
+    initial_x: float = 0.0,
+    initial_y: float = 0.0,
+    initial_z: float = 0.0,
+    initial_e: float = 0.0,
+    initial_absolute_xyz: bool = True,
+    initial_absolute_e: bool = True,
+) -> dict:
+    """Parse G-code moves into segments for path preview.
+
+    Returns segments, per-layer point lists, bounds, and final machine state.
+    """
+    x, y, z, e = initial_x, initial_y, initial_z, initial_e
+    absolute_e = initial_absolute_e
+    absolute_xyz = initial_absolute_xyz
+    segments: list[dict] = []
+    layer_points: dict[float, list[list[float]]] = {}
+    min_x = min_y = min_z = float("inf")
+    max_x = max_y = max_z = float("-inf")
+
+    def _track_bounds(px: float, py: float, pz: float) -> None:
+        nonlocal min_x, max_x, min_y, max_y, min_z, max_z
+        min_x = min(min_x, px)
+        max_x = max(max_x, px)
+        min_y = min(min_y, py)
+        max_y = max(max_y, py)
+        min_z = min(min_z, pz)
+        max_z = max(max_z, pz)
+
+    def _add_layer_point(lz: float, px: float, py: float, pz: float) -> None:
+        key = round(lz, 3)
+        layer_points.setdefault(key, []).append([round(px, 3), round(py, 3), round(pz, 3)])
+
+    for idx, line in enumerate(lines):
+        stripped = _strip_comment(line)
+        if not stripped:
+            continue
+
+        upper = stripped.upper()
+        if upper.startswith("G90"):
+            absolute_xyz = True
+        elif upper.startswith("G91"):
+            absolute_xyz = False
+        elif upper.startswith("M82"):
+            absolute_e = True
+        elif upper.startswith("M83"):
+            absolute_e = False
+
+        if not (MOVE_RE.match(stripped) or G0_RE.match(stripped)):
+            continue
+
+        prev_x, prev_y, prev_z, prev_e = x, y, z, e
+        params = _parse_params(stripped)
+        if "X" in params:
+            x = params["X"] if absolute_xyz else x + params["X"]
+        if "Y" in params:
+            y = params["Y"] if absolute_xyz else y + params["Y"]
+        if "Z" in params:
+            x_before_z = x
+            y_before_z = y
+            z = params["Z"] if absolute_xyz else z + params["Z"]
+            _add_layer_point(z, x_before_z, y_before_z, z)
+
+        e_delta = 0.0
+        is_extrusion = False
+        if "E" in params:
+            e_val = params["E"]
+            if absolute_e:
+                is_extrusion = e_val > e + 1e-9
+                e_delta = e_val - e
+                e = e_val
+            else:
+                is_extrusion = e_val > 1e-9
+                e_delta = e_val
+                e += e_val
+
+        if abs(x - prev_x) < 1e-9 and abs(y - prev_y) < 1e-9 and abs(z - prev_z) < 1e-9:
+            continue
+
+        seg_type = _classify_segment(prev_x, prev_y, prev_z, x, y, z, is_extrusion)
+        _track_bounds(prev_x, prev_y, prev_z)
+        _track_bounds(x, y, z)
+
+        segments.append(
+            {
+                "x1": round(prev_x, 3),
+                "y1": round(prev_y, 3),
+                "z1": round(prev_z, 3),
+                "x2": round(x, 3),
+                "y2": round(y, 3),
+                "z2": round(z, 3),
+                "e_delta": round(e_delta, 5),
+                "type": seg_type,
+                "line": idx,
+            }
+        )
+
+    if min_z == float("inf"):
+        min_x = max_x = min_y = max_y = min_z = max_z = 0.0
+
+    layers = [
+        {"z": z_val, "points": pts}
+        for z_val, pts in sorted(layer_points.items(), key=lambda item: item[0])
+    ]
+
+    return {
+        "segments": segments,
+        "layers": layers,
+        "bounds": {
+            "min_x": round(min_x, 3),
+            "max_x": round(max_x, 3),
+            "min_y": round(min_y, 3),
+            "max_y": round(max_y, 3),
+            "min_z": round(min_z, 3),
+            "max_z": round(max_z, 3),
+        },
+        "final_position": {"x": round(x, 3), "y": round(y, 3), "z": round(z, 3), "e": round(e, 5)},
+        "absolute_xyz": absolute_xyz,
+        "absolute_e": absolute_e,
+        "stopped_z": stopped_z,
+        "resume_line_index": resume_line_index,
+    }
+
+
+def _segment_max_z(seg: dict) -> float:
+    return max(seg["z1"], seg["z2"])
+
+
+def _segment_end(seg: dict) -> tuple[float, float, float]:
+    return seg["x2"], seg["y2"], seg["z2"]
+
+
+def _segment_start(seg: dict) -> tuple[float, float, float]:
+    return seg["x1"], seg["y1"], seg["z1"]
+
+
+def _xy_distance(a: tuple[float, float], b: tuple[float, float]) -> float:
+    return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+def _line_crosses_rect(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    min_x: float,
+    max_x: float,
+    min_y: float,
+    max_y: float,
+) -> bool:
+    """Simple check: segment endpoints or midpoint lie inside printed XY bounds."""
+    mid_x = (x1 + x2) / 2
+    mid_y = (y1 + y2) / 2
+
+    def inside(px: float, py: float) -> bool:
+        return min_x <= px <= max_x and min_y <= py <= max_y
+
+    return inside(x1, y1) or inside(x2, y2) or inside(mid_x, mid_y)
+
+
+def analyze_resume_join(
+    segments: list[dict],
+    stopped_z: float,
+    resume_idx: int,
+    resume_header_segments: list[dict] | None = None,
+    continuation_segments: list[dict] | None = None,
+    current_position: tuple[float, float, float] | None = None,
+    printed_bounds: dict | None = None,
+    resume_z: float | None = None,
+) -> dict:
+    """Analyze gap and warnings between last printed extrusion and resume start."""
+    resume_header_segments = resume_header_segments or []
+    continuation_segments = continuation_segments or []
+
+    last_printed_point: dict | None = None
+    last_printed_seg: dict | None = None
+    for seg in segments:
+        if seg["type"] != "extrusion":
+            continue
+        if _segment_max_z(seg) <= stopped_z + 1e-6:
+            last_printed_seg = seg
+            last_printed_point = {
+                "x": seg["x2"],
+                "y": seg["y2"],
+                "z": seg["z2"],
+                "line": seg["line"] + 1,
+            }
+
+    first_resume_extrusion_point: dict | None = None
+    for seg in continuation_segments:
+        if seg["type"] == "extrusion":
+            first_resume_extrusion_point = {
+                "x": seg["x1"],
+                "y": seg["y1"],
+                "z": seg["z1"],
+                "line": seg["line"] + 1,
+            }
+            break
+
+    gap_mm = 0.0
+    if last_printed_point and first_resume_extrusion_point:
+        gap_mm = _xy_distance(
+            (last_printed_point["x"], last_printed_point["y"]),
+            (first_resume_extrusion_point["x"], first_resume_extrusion_point["y"]),
+        )
+
+    z_mismatch = 0.0
+    if first_resume_extrusion_point:
+        target_z = resume_z if resume_z is not None else stopped_z
+        z_mismatch = abs(first_resume_extrusion_point["z"] - target_z)
+
+    warnings: list[str] = []
+    if gap_mm > 0.5:
+        warnings.append(
+            f"Join gap is {gap_mm:.2f} mm in XY — resume may leave empty space before extrusion continues."
+        )
+    if first_resume_extrusion_point and first_resume_extrusion_point["z"] < stopped_z - 0.05:
+        warnings.append(
+            f"Resume extrusion starts at Z {first_resume_extrusion_point['z']:.2f} mm, "
+            f"below stopped Z ({stopped_z:.2f} mm)."
+        )
+    elif resume_z is not None and z_mismatch > 0.15:
+        warnings.append(
+            f"First extrusion Z ({first_resume_extrusion_point['z']:.2f} mm) differs from "
+            f"resume target Z ({resume_z:.2f} mm) by {z_mismatch:.2f} mm."
+        )
+
+    travel_crosses_print = False
+    if printed_bounds and resume_header_segments and current_position:
+        bx = printed_bounds
+        for seg in resume_header_segments:
+            if seg["type"] != "travel":
+                continue
+            if _line_crosses_rect(
+                seg["x1"],
+                seg["y1"],
+                seg["x2"],
+                seg["y2"],
+                bx["min_x"],
+                bx["max_x"],
+                bx["min_y"],
+                bx["max_y"],
+            ):
+                travel_crosses_print = True
+                break
+
+    if travel_crosses_print:
+        warnings.append(
+            "Resume travel path may cross over already-printed area — verify nozzle height is sufficient."
+        )
+
+    return {
+        "last_printed_point": last_printed_point,
+        "first_resume_extrusion_point": first_resume_extrusion_point,
+        "gap_mm": round(gap_mm, 3),
+        "z_mismatch_mm": round(z_mismatch, 3),
+        "travel_crosses_print": travel_crosses_print,
+        "warnings": warnings,
+        "current_position": (
+            {"x": current_position[0], "y": current_position[1], "z": current_position[2]}
+            if current_position
+            else None
+        ),
+    }
+
+
+def _cap_segments(segments: list[dict], limit: int = MAX_PREVIEW_SEGMENTS) -> tuple[list[dict], bool]:
+    if len(segments) <= limit:
+        return segments, False
+    step = max(1, len(segments) // limit)
+    return [segments[i] for i in range(0, len(segments), step)], True
+
+
+def _state_at_line(lines: list[str], line_index: int) -> tuple[float, float, float, float, bool, bool]:
+    if line_index <= 0:
+        return 0.0, 0.0, 0.0, 0.0, True, True
+    partial = parse_gcode_paths(lines[:line_index])
+    pos = partial["final_position"]
+    return (
+        pos["x"],
+        pos["y"],
+        pos["z"],
+        pos["e"],
+        partial["absolute_xyz"],
+        partial["absolute_e"],
+    )
+
+
+def build_path_preview(
+    original_lines: list[str],
+    params: ResumeParams,
+    result: ResumeResult,
+) -> dict:
+    """Build preview payload for API / visualization."""
+    full_parse = parse_gcode_paths(original_lines, params.stopped_z, result.resume_line_index)
+    all_segments = full_parse["segments"]
+
+    header_end = len(result.output_lines) - (len(original_lines) - result.resume_line_index)
+    header_lines = result.output_lines[:header_end]
+    header_parse = parse_gcode_paths(
+        header_lines,
+        initial_x=params.current_x,
+        initial_y=params.current_y,
+        initial_z=params.current_z,
+        initial_absolute_xyz=True,
+        initial_absolute_e=False,
+    )
+    resume_segments = header_parse["segments"]
+
+    cx, cy, cz, ce, abs_xyz, abs_e = _state_at_line(original_lines, result.resume_line_index)
+    continuation_lines = original_lines[result.resume_line_index :]
+    continuation_parse = parse_gcode_paths(
+        continuation_lines,
+        initial_x=cx,
+        initial_y=cy,
+        initial_z=cz,
+        initial_e=ce,
+        initial_absolute_xyz=abs_xyz,
+        initial_absolute_e=abs_e,
+    )
+    continuation_segments = continuation_parse["segments"]
+    for seg in continuation_segments:
+        seg["line"] = seg["line"] + result.resume_line_index
+
+    printed_segments = [
+        seg
+        for seg in all_segments
+        if seg["type"] == "extrusion" and _segment_max_z(seg) <= params.stopped_z + 1e-6
+    ]
+
+    printed_bounds = full_parse["bounds"]
+    if printed_segments:
+        printed_bounds = {
+            "min_x": min(min(s["x1"], s["x2"]) for s in printed_segments),
+            "max_x": max(max(s["x1"], s["x2"]) for s in printed_segments),
+            "min_y": min(min(s["y1"], s["y2"]) for s in printed_segments),
+            "max_y": max(max(s["y1"], s["y2"]) for s in printed_segments),
+            "min_z": min(min(s["z1"], s["z2"]) for s in printed_segments),
+            "max_z": max(min(s["z1"], s["z2"]) for s in printed_segments),
+        }
+
+    join_info = analyze_resume_join(
+        all_segments,
+        params.stopped_z,
+        result.resume_line_index,
+        resume_header_segments=resume_segments,
+        continuation_segments=continuation_segments,
+        current_position=(params.current_x, params.current_y, params.current_z),
+        printed_bounds=printed_bounds,
+        resume_z=result.resume_z,
+    )
+
+    capped_all, sampled = _cap_segments(all_segments)
+    capped_printed, _ = _cap_segments(printed_segments, limit=MAX_PREVIEW_SEGMENTS // 2)
+    capped_resume, _ = _cap_segments(resume_segments, limit=500)
+    capped_continuation, _ = _cap_segments(continuation_segments, limit=MAX_PREVIEW_SEGMENTS // 2)
+
+    return {
+        "segments": capped_all,
+        "printed_segments": capped_printed,
+        "resume_segments": capped_resume,
+        "continuation_segments": capped_continuation,
+        "join_info": join_info,
+        "bounds": full_parse["bounds"],
+        "layers": full_parse["layers"],
+        "sampled": sampled,
+        "stopped_z": params.stopped_z,
+        "resume_line_index": result.resume_line_index,
+    }
 
 
 def generate_resume_gcode(

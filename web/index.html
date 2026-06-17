@@ -83,6 +83,32 @@
     <section id="result" class="card hidden">
       <h2>Result</h2>
       <div id="result-meta"></div>
+      <div id="join-banner" class="join-banner hidden"></div>
+      <div id="path-preview" class="path-preview hidden">
+        <div class="preview-toolbar">
+          <label class="preview-toggle">
+            <input type="radio" name="view-mode" value="xy" checked> Top-down (XY)
+          </label>
+          <label class="preview-toggle">
+            <input type="radio" name="view-mode" value="xz"> Side (XZ)
+          </label>
+          <label class="layer-filter">
+            Max layer Z
+            <input type="range" id="layer-slider" min="0" max="100" step="0.01" value="100">
+            <span id="layer-slider-value">—</span>
+          </label>
+          <button type="button" id="preview-reset-btn" class="preview-btn">Reset view</button>
+        </div>
+        <canvas id="preview-canvas" width="760" height="420"></canvas>
+        <div class="preview-legend">
+          <span class="legend-item"><i class="swatch printed"></i> Printed</span>
+          <span class="legend-item"><i class="swatch travel"></i> Resume travel</span>
+          <span class="legend-item"><i class="swatch continuation"></i> New extrusion</span>
+          <span class="legend-item"><i class="dot red"></i> Nozzle now</span>
+          <span class="legend-item"><i class="dot green"></i> Resume start</span>
+        </div>
+        <p class="hint" id="preview-hint">Drag to pan, scroll to zoom. Use the layer slider to hide moves above a Z height.</p>
+      </div>
       <div class="actions">
         <button type="button" id="download-btn" class="primary">Download G-code</button>
         <button type="button" id="copy-btn">Copy to clipboard</button>
@@ -97,9 +123,10 @@
         <li>Enter the Z height of the last good layer (not where the nozzle is now).</li>
         <li>Enter the machine's current X, Y, Z from the LCD or send <code>M114</code>.</li>
         <li>The tool trims everything below that layer and moves the nozzle with explicit G-code (no G92).</li>
+        <li>After generating, use the built-in path preview to verify the resume join — check for gaps or travel over printed areas.</li>
         <li>Do not home the printer after a failure — send <code>M114</code> first. Homing Z to the top will break coordinates.</li>
       </ol>
-      <p class="hint">Load the new file in your slicer viewer to confirm it sits on the build plate before printing.</p>
+      <p class="hint">The preview shows printed paths, resume travel, and new extrusion. You can still load the file in your slicer viewer for a final check.</p>
     </section>
   </main>
 
