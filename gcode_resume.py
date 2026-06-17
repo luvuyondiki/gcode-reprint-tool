@@ -610,7 +610,7 @@ def analyze_resume_join(
             f"Resume extrusion starts at Z {first_resume_extrusion_point['z']:.2f} mm, "
             f"below stopped Z ({stopped_z:.2f} mm)."
         )
-    elif resume_z is not None and z_mismatch > 0.15:
+    elif first_resume_extrusion_point is not None and resume_z is not None and z_mismatch > 0.15:
         warnings.append(
             f"First extrusion Z ({first_resume_extrusion_point['z']:.2f} mm) differs from "
             f"resume target Z ({resume_z:.2f} mm) by {z_mismatch:.2f} mm."
@@ -727,7 +727,7 @@ def build_path_preview(
             "min_y": min(min(s["y1"], s["y2"]) for s in printed_segments),
             "max_y": max(max(s["y1"], s["y2"]) for s in printed_segments),
             "min_z": min(min(s["z1"], s["z2"]) for s in printed_segments),
-            "max_z": max(min(s["z1"], s["z2"]) for s in printed_segments),
+            "max_z": max(max(s["z1"], s["z2"]) for s in printed_segments),
         }
 
     join_info = analyze_resume_join(
