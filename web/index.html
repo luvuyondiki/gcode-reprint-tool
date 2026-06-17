@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>G-code Resume Tool</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="container">
+    <header>
+      <h1>G-code Resume Tool</h1>
+      <p class="subtitle">
+        Continue a failed print from the last good layer. Enter where printing stopped,
+        and where your nozzle is right now.
+      </p>
+    </header>
+
+    <form id="resume-form">
+      <section class="card">
+        <h2>Original G-code</h2>
+        <label class="file-drop" id="file-drop">
+          <input type="file" id="gcode-file" accept=".gcode,.gco,.g,.nc,.txt" required>
+          <span id="file-label">Drop your G-code file here or click to browse</span>
+        </label>
+      </section>
+
+      <section class="card" id="file-info" hidden>
+        <h2>Detected print info</h2>
+        <p class="hint" id="print-bounds"></p>
+        <label>
+          Pick last printed layer
+          <select id="layer-select">
+            <option value="">— or enter Stopped Z manually —</option>
+          </select>
+        </label>
+      </section>
+
+      <section class="card grid">
+        <div>
+          <h2>Last printed layer</h2>
+          <p class="hint">Z height of the last layer that finished successfully (mm)</p>
+          <label>
+            Stopped Z
+            <input type="number" id="stopped-z" step="0.01" required placeholder="e.g. 15.20">
+          </label>
+        </div>
+
+        <div>
+          <h2>Current nozzle position</h2>
+          <p class="hint">Read X, Y, Z from your printer display or M114</p>
+          <div class="xyz-row">
+            <label>
+              X
+              <input type="number" id="current-x" step="0.01" required placeholder="0.00">
+            </label>
+            <label>
+              Y
+              <input type="number" id="current-y" step="0.01" required placeholder="0.00">
+            </label>
+            <label>
+              Z
+              <input type="number" id="current-z" step="0.01" required placeholder="0.00">
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <section class="card options">
+        <label>
+          Safe Z lift before travel (mm)
+          <input type="number" id="z-lift" step="0.1" value="2" min="0">
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" id="require-extrusion" checked>
+          Resume at first extrusion move above stopped Z
+        </label>
+      </section>
+
+      <button type="submit" class="primary" id="submit-btn">Generate resume G-code</button>
+    </form>
+
+    <section id="result" class="card hidden">
+      <h2>Result</h2>
+      <div id="result-meta"></div>
+      <div class="actions">
+        <button type="button" id="download-btn" class="primary">Download G-code</button>
+        <button type="button" id="copy-btn">Copy to clipboard</button>
+      </div>
+      <pre id="preview"></pre>
+    </section>
+
+    <section class="card info">
+      <h2>How it works</h2>
+      <ol>
+        <li>Upload the original G-code from your slicer.</li>
+        <li>Enter the Z height of the last good layer (not where the nozzle is now).</li>
+        <li>Enter the machine's current X, Y, Z from the LCD or send <code>M114</code>.</li>
+        <li>The tool trims everything below that layer and moves the nozzle with explicit G-code (no G92).</li>
+        <li>Do not home the printer after a failure — send <code>M114</code> first. Homing Z to the top will break coordinates.</li>
+      </ol>
+      <p class="hint">Load the new file in your slicer viewer to confirm it sits on the build plate before printing.</p>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
